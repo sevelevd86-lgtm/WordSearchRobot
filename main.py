@@ -1,72 +1,105 @@
 # ============================================================
 # WordSearchRobot
 # Telegram Inline Dictionary Bot
-# Python + aiogram 3
+#
+# Функционал:
+# 1. Работа через Inline Mode:
+#       @WordSearchRobot вода
+#
+# 2. Проверка подписки на @planee_telegram
+#
+# 3. Если подписки нет:
+#       Inline -> Открыть бота -> /start
+#
+# 4. В личном чате:
+#       📢 Подписаться
+#       ✅ Проверить подписку
+#
+# 5. После подписки:
+#       🔎 Открыть словарь
+#
+# 6. Поиск определения через Wikipedia API
 # ============================================================
 
-# -----------------------------
-# Импорт стандартных библиотек
-# -----------------------------
+
+# ============================================================
+# ИМПОРТЫ
+# ============================================================
 
 import asyncio
 import html
 import logging
 import os
 import re
-
-# -----------------------------
-# Импорт сторонних библиотек
-# -----------------------------
+from typing import Optional
 
 import aiohttp
 
 from dotenv import load_dotenv
 
-# aiogram
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, Router, F
+
+from aiogram.filters import CommandStart
+
 from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultsButton,
     CallbackQuery,
+    Message,
 )
 
-# -----------------------------
-# Загружаем переменные .env
-# -----------------------------
 
+# ============================================================
+# ЗАГРУЗКА .ENV
+# ============================================================
+
+# Загружаем переменные из файла .env.
 load_dotenv()
 
-# -----------------------------
-# Получаем настройки
-# -----------------------------
 
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
+
+# Получаем токен Telegram-бота.
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+
+# Username нашего канала.
 CHANNEL_USERNAME = os.getenv(
     "CHANNEL_USERNAME",
     "@planee_telegram"
 )
 
+
+# Ссылка на канал.
 CHANNEL_URL = os.getenv(
     "CHANNEL_URL",
     "https://t.me/planee_telegram"
 )
 
-# -----------------------------
-# Проверяем наличие токена
-# -----------------------------
 
+# Username бота.
+BOT_USERNAME = os.getenv(
+    "BOT_USERNAME",
+    "WordSearchRobot"
+)
+
+
+# Проверяем наличие токена.
 if not BOT_TOKEN:
     raise RuntimeError(
-        "Не найден BOT_TOKEN в файле .env"
+        "❌ BOT_TOKEN не найден в файле .env"
     )
 
-# -----------------------------
-# Настройка логирования
-# -----------------------------
+
+# ============================================================
+# ЛОГИРОВАНИЕ
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,89 +108,98 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# -----------------------------
-# Создаём Router
-# -----------------------------
+
+# ============================================================
+# ROUTER
+# ============================================================
 
 router = Router()
 
-# ============================================================
-# Вспомогательные функции
-# ============================================================
 
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
 
 def clean_word(text: str) -> str:
     """
-    Очищает поисковый запрос пользователя.
+    Очищает поисковый запрос.
 
     Например:
 
-        " вода "
-        "ВОДА!!!"
-        "что такое вода"
+        "  вода  "
 
-    превращается в более удобный поисковый запрос.
+    превращается в:
+
+        "вода"
     """
 
     # Убираем пробелы в начале и конце.
     text = text.strip()
 
-    # Убираем лишние пробелы.
-    text = re.sub(r"\s+", " ", text)
+    # Заменяем несколько пробелов одним.
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
 
     return text
 
 
-def normalize_word(text: str) -> str:
+def escape_html(text: str) -> str:
     """
-    Приводит слово к нижнему регистру.
-
-    Используется для сравнения результатов.
+    Безопасно экранирует HTML.
     """
 
-    return text.strip().lower()
+    return html.escape(
+        text,
+        quote=False
+    )
 
 
 # ============================================================
-# Проверка подписки
+# ПРОВЕРКА ПОДПИСКИ
 # ============================================================
-
 
 async def check_subscription(
     bot: Bot,
     user_id: int
-) -> bool:
+) -> Optional[bool]:
     """
-    Проверяет, подписан ли пользователь на канал.
+    Проверяет подписку пользователя на канал.
 
-    Telegram возвращает объект ChatMember.
+    Возвращает:
 
-    Нас интересуют статусы:
+        True  -> пользователь подписан
+        False -> пользователь не подписан
+        None  -> произошла ошибка проверки
 
-        member
-        administrator
-        creator
-
-    Также учитываем restricted, если пользователь
-    всё ещё является участником канала.
+    ВАЖНО:
+    Бот должен быть администратором канала.
     """
 
     try:
 
-        # Запрашиваем информацию о пользователе
-        # в нашем канале.
+        # Получаем информацию о пользователе
+        # внутри нашего канала.
         member = await bot.get_chat_member(
             chat_id=CHANNEL_USERNAME,
             user_id=user_id
         )
 
-        # Получаем статус пользователя.
+        # Получаем статус.
         status = member.status
 
+        # Для диагностики выводим в консоль.
         logger.info(
-            "Проверка подписки: user=%s status=%s",
+            "[SUB CHECK] user=%s | status=%s | is_member=%s",
             user_id,
-            status
+            status,
+            getattr(
+                member,
+                "is_member",
+                None
+            )
         )
 
         # Обычный подписчик.
@@ -172,56 +214,66 @@ async def check_subscription(
         if status == "creator":
             return True
 
-        # В некоторых случаях пользователь
-        # может иметь restricted-статус,
-        # но при этом оставаться участником.
+        # Пользователь может быть restricted,
+        # но всё ещё состоять в канале.
         if status == "restricted":
 
-            # Проверяем параметр is_member.
-            if getattr(member, "is_member", False):
+            if getattr(
+                member,
+                "is_member",
+                False
+            ):
                 return True
 
-        # Во всех остальных случаях считаем,
-        # что пользователь не подписан.
+        # Во всех остальных случаях
+        # пользователь не считается подписанным.
         return False
 
     except Exception as error:
 
-        # Записываем ошибку в консоль.
+        # Очень важно:
+        # ошибка НЕ означает автоматически,
+        # что пользователь не подписан.
         logger.exception(
-            "Ошибка проверки подписки: %s",
+            "[SUB ERROR] user=%s | %s",
+            user_id,
             error
         )
 
-        # Безопаснее считать пользователя
-        # неподписанным, если Telegram не ответил.
-        return False
+        # Возвращаем None,
+        # чтобы отличить ошибку от отсутствия подписки.
+        return None
 
 
 # ============================================================
-# Клавиатура подписки
+# КЛАВИАТУРА ПОДПИСКИ
 # ============================================================
 
-
-def subscription_keyboard() -> InlineKeyboardMarkup:
+def get_subscription_keyboard() -> InlineKeyboardMarkup:
     """
-    Создаёт клавиатуру:
+    Клавиатура для личного чата с ботом.
 
-    📢 Подписаться
-    ✅ Я подписался
+    Кнопки:
+
+        📢 Подписаться
+        ✅ Проверить подписку
     """
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
+
+            # Кнопка открытия канала.
             [
                 InlineKeyboardButton(
                     text="📢 Подписаться",
                     url=CHANNEL_URL
                 )
             ],
+
+            # Кнопка проверки.
             [
                 InlineKeyboardButton(
-                    text="✅ Я подписался",
+                    text="✅ Проверить подписку",
                     callback_data="check_subscription"
                 )
             ]
@@ -230,235 +282,152 @@ def subscription_keyboard() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# Работа с Wikipedia
+# КЛАВИАТУРА ПОСЛЕ ПОДПИСКИ
 # ============================================================
 
+def get_dictionary_keyboard() -> InlineKeyboardMarkup:
+    """
+    Кнопка возвращает пользователя
+    в Inline Mode.
+
+    Telegram автоматически вставит:
+
+        @WordSearchRobot
+
+    в поле ввода текущего чата.
+    """
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+
+            [
+                InlineKeyboardButton(
+                    text="🔎 Открыть словарь",
+                    switch_inline_query_current_chat=""
+                )
+            ]
+
+        ]
+    )
+
+
+# ============================================================
+# HTTP ЗАПРОС К WIKIPEDIA
+# ============================================================
 
 async def wikipedia_request(
     params: dict
 ) -> dict:
     """
-    Выполняет запрос к Wikipedia API.
+    Выполняет HTTP-запрос к Wikipedia API.
     """
 
-    # Используем русский Wikipedia.
+    # Русская Wikipedia.
     url = "https://ru.wikipedia.org/w/api.php"
 
-    # Создаём HTTP-сессию.
-    timeout = aiohttp.ClientTimeout(total=8)
+    # Таймаут запроса.
+    timeout = aiohttp.ClientTimeout(
+        total=8
+    )
 
+    # Создаём HTTP-сессию.
     async with aiohttp.ClientSession(
         timeout=timeout
     ) as session:
 
-        # Отправляем GET-запрос.
+        # Выполняем GET-запрос.
         async with session.get(
             url,
             params=params,
             headers={
                 "User-Agent":
-                    "WordSearchRobot/1.0 Telegram Dictionary Bot"
+                    "WordSearchRobot/1.0"
             }
         ) as response:
 
-            # Проверяем HTTP-код.
+            # Если сервер вернул ошибку,
+            # aiohttp выбросит исключение.
             response.raise_for_status()
 
             # Получаем JSON.
             return await response.json()
 
 
-async def search_wikipedia(
-    word: str
-) -> dict | None:
-    """
-    Ищет статью в русской Wikipedia.
+# ============================================================
+# ПОЛУЧЕНИЕ СТАТЬИ WIKIPEDIA
+# ============================================================
 
-    Сначала пытаемся найти точное совпадение.
-    Если его нет — используем поиск.
-    """
-
-    # --------------------------------------------------------
-    # Шаг 1. Пытаемся получить страницу по точному названию.
-    # --------------------------------------------------------
-
-    exact_params = {
-        "action": "query",
-        "format": "json",
-        "formatversion": "2",
-
-        # Получаем краткое описание статьи.
-        "prop": "extracts",
-
-        # Максимум около 500 символов.
-        "exchars": "500",
-
-        # Без HTML-разметки.
-        "explaintext": "1",
-
-        # Ищем конкретную страницу.
-        "titles": word,
-
-        # Язык Wikipedia.
-        "redirects": "1"
-    }
-
-    try:
-
-        data = await wikipedia_request(
-            exact_params
-        )
-
-        pages = data.get(
-            "query",
-            {}
-        ).get(
-            "pages",
-            []
-        )
-
-        # Если страница существует.
-        if pages:
-
-            page = pages[0]
-
-            # В API может быть отрицательный pageid
-            # для отсутствующей страницы.
-            if not page.get("missing"):
-
-                extract = page.get(
-                    "extract",
-                    ""
-                ).strip()
-
-                if extract:
-
-                    return {
-                        "title": page.get(
-                            "title",
-                            word
-                        ),
-                        "extract": extract
-                    }
-
-    except Exception as error:
-
-        logger.exception(
-            "Ошибка точного поиска Wikipedia: %s",
-            error
-        )
-
-    # --------------------------------------------------------
-    # Шаг 2. Если точного совпадения нет,
-    # выполняем поиск по Wikipedia.
-    # --------------------------------------------------------
-
-    search_params = {
-        "action": "query",
-        "format": "json",
-        "formatversion": "2",
-
-        "list": "search",
-
-        "srsearch": word,
-
-        "srlimit": "5",
-
-        "srnamespace": "0"
-    }
-
-    try:
-
-        data = await wikipedia_request(
-            search_params
-        )
-
-        results = data.get(
-            "query",
-            {}
-        ).get(
-            "search",
-            []
-        )
-
-        # Если результаты найдены.
-        if results:
-
-            # Берём первый результат.
-            first_result = results[0]
-
-            title = first_result.get(
-                "title"
-            )
-
-            if title:
-
-                # Теперь получаем полноценную статью.
-                return await wikipedia_request_article(
-                    title
-                )
-
-    except Exception as error:
-
-        logger.exception(
-            "Ошибка поиска Wikipedia: %s",
-            error
-        )
-
-    # Ничего не нашли.
-    return None
-
-
-async def wikipedia_request_article(
+async def get_wikipedia_article(
     title: str
-) -> dict | None:
+) -> Optional[dict]:
     """
-    Получает короткую выдержку конкретной статьи.
+    Получает конкретную статью Wikipedia.
     """
 
+    # Параметры запроса.
     params = {
+
+        # Используем MediaWiki API.
         "action": "query",
+
+        # Ответ в JSON.
         "format": "json",
+
+        # Более удобный формат ответа.
         "formatversion": "2",
 
+        # Получаем текст статьи.
         "prop": "extracts",
 
-        "exchars": "500",
+        # Ограничиваем длину.
+        "exchars": "1000",
 
+        # Получаем обычный текст без HTML.
         "explaintext": "1",
 
+        # Название статьи.
         "titles": title,
 
+        # Учитываем перенаправления.
         "redirects": "1"
     }
 
     try:
 
+        # Отправляем запрос.
         data = await wikipedia_request(
             params
         )
 
-        pages = data.get(
-            "query",
-            {}
-        ).get(
-            "pages",
-            []
+        # Получаем список страниц.
+        pages = (
+            data
+            .get("query", {})
+            .get("pages", [])
         )
 
+        # Если ничего нет.
         if not pages:
             return None
 
+        # Берём первую страницу.
         page = pages[0]
 
+        # Проверяем, существует ли страница.
+        if page.get("missing"):
+            return None
+
+        # Получаем текст.
         extract = page.get(
             "extract",
             ""
         ).strip()
 
+        # Если текста нет.
         if not extract:
             return None
 
+        # Возвращаем результат.
         return {
             "title": page.get(
                 "title",
@@ -470,7 +439,7 @@ async def wikipedia_request_article(
     except Exception as error:
 
         logger.exception(
-            "Ошибка получения статьи: %s",
+            "[WIKIPEDIA ERROR] %s",
             error
         )
 
@@ -478,19 +447,117 @@ async def wikipedia_request_article(
 
 
 # ============================================================
-# Форматирование определения
+# ПОИСК WIKIPEDIA
 # ============================================================
 
+async def search_wikipedia(
+    word: str
+) -> Optional[dict]:
+    """
+    Ищет слово в Wikipedia.
+
+    Сначала пробуем точное совпадение.
+
+    Если точной статьи нет,
+    выполняем обычный поиск.
+    """
+
+    # --------------------------------------------------------
+    # СНАЧАЛА ИЩЕМ ТОЧНУЮ СТАТЬЮ
+    # --------------------------------------------------------
+
+    exact = await get_wikipedia_article(
+        word
+    )
+
+    # Если нашли точную статью,
+    # сразу возвращаем её.
+    if exact:
+        return exact
+
+
+    # --------------------------------------------------------
+    # ТОЧНОЙ СТАТЬИ НЕТ
+    # ИЩЕМ ПО ПОИСКОВОМУ ЗАПРОСУ
+    # --------------------------------------------------------
+
+    params = {
+
+        "action": "query",
+
+        "format": "json",
+
+        "formatversion": "2",
+
+        "list": "search",
+
+        # Поисковая строка.
+        "srsearch": word,
+
+        # Максимум 5 вариантов.
+        "srlimit": "5",
+
+        # Только обычные статьи.
+        "srnamespace": "0"
+    }
+
+    try:
+
+        # Отправляем запрос.
+        data = await wikipedia_request(
+            params
+        )
+
+        # Получаем результаты.
+        results = (
+            data
+            .get("query", {})
+            .get("search", [])
+        )
+
+        # Если ничего не нашли.
+        if not results:
+            return None
+
+        # Берём первый результат.
+        first = results[0]
+
+        # Получаем название.
+        title = first.get(
+            "title"
+        )
+
+        # Если название отсутствует.
+        if not title:
+            return None
+
+        # Получаем полноценную статью.
+        return await get_wikipedia_article(
+            title
+        )
+
+    except Exception as error:
+
+        logger.exception(
+            "[WIKIPEDIA SEARCH ERROR] %s",
+            error
+        )
+
+        return None
+
+
+# ============================================================
+# ФОРМАТИРОВАНИЕ ОПРЕДЕЛЕНИЯ
+# ============================================================
 
 def make_definition(
     title: str,
     extract: str
 ) -> str:
     """
-    Превращает Wikipedia-выдержку
-    в короткое определение.
+    Делает короткое и понятное определение.
 
-    Ограничиваем текст 500 символами.
+    Максимум 500 символов.
     """
 
     # Убираем переносы строк.
@@ -500,25 +567,46 @@ def make_definition(
         extract
     ).strip()
 
-    # Если Wikipedia начала с технического текста,
-    # всё равно стараемся сделать короткий ответ.
+    # --------------------------------------------------------
+    # Пытаемся оставить максимум 2-3 предложения.
+    # --------------------------------------------------------
 
-    # Максимум 500 символов.
-    if len(text) > 500:
-
-        # Обрезаем.
-        text = text[:497].rstrip() + "..."
-
-    # Экранируем HTML.
-    safe_title = html.escape(
-        title
-    )
-
-    safe_text = html.escape(
+    # Разбиваем текст по предложениям.
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
         text
     )
 
-    # Финальный формат.
+    # Берём максимум 3 предложения.
+    sentences = sentences[:3]
+
+    # Собираем обратно.
+    text = " ".join(
+        sentences
+    ).strip()
+
+    # --------------------------------------------------------
+    # Ограничиваем 500 символами.
+    # --------------------------------------------------------
+
+    if len(text) > 500:
+
+        text = (
+            text[:497]
+            .rstrip()
+            + "..."
+        )
+
+    # Экранируем HTML.
+    safe_title = escape_html(
+        title
+    )
+
+    safe_text = escape_html(
+        text
+    )
+
+    # Формируем итог.
     return (
         f"<b>{safe_title}</b> — "
         f"{safe_text}"
@@ -526,45 +614,186 @@ def make_definition(
 
 
 # ============================================================
-# Результат для неподписанного пользователя
+# /START
 # ============================================================
 
-
-def subscription_result() -> InlineQueryResultArticle:
+@router.message(
+    CommandStart()
+)
+async def start_handler(
+    message: Message,
+    bot: Bot
+):
     """
-    Возвращает Inline-результат,
-    который предлагает подписаться.
+    Обработчик команды /start.
+
+    Пользователь попадает сюда,
+    когда открывает бота.
     """
 
-    return InlineQueryResultArticle(
-        id="subscription_required",
+    # Получаем ID пользователя.
+    user_id = message.from_user.id
 
-        title="🔒 Требуется подписка",
+    # Проверяем подписку.
+    subscribed = await check_subscription(
+        bot,
+        user_id
+    )
 
-        description=(
-            "Подпишитесь на канал, "
-            "чтобы искать слова."
-        ),
+    # --------------------------------------------------------
+    # ОШИБКА ПРОВЕРКИ
+    # --------------------------------------------------------
 
-        input_message_content=InputTextMessageContent(
-            message_text=(
-                "🔒 <b>Чтобы использовать "
-                "WordSearchRobot</b>,\n\n"
-                "подпишитесь на наш канал "
-                "<b>@planee_telegram</b>."
-            ),
+    if subscribed is None:
 
-            parse_mode="HTML"
-        ),
+        await message.answer(
+            "⚠️ <b>Не удалось проверить подписку.</b>\n\n"
+            "Попробуйте нажать кнопку "
+            "«Проверить подписку» ещё раз.",
+            parse_mode="HTML",
+            reply_markup=get_subscription_keyboard()
+        )
 
-        reply_markup=subscription_keyboard()
+        return
+
+
+    # --------------------------------------------------------
+    # ПОЛЬЗОВАТЕЛЬ УЖЕ ПОДПИСАН
+    # --------------------------------------------------------
+
+    if subscribed:
+
+        await message.answer(
+            "✅ <b>Вы уже подписаны!</b>\n\n"
+            "Теперь вы можете пользоваться "
+            "WordSearchRobot.\n\n"
+            "🔎 Используйте в любом чате:\n\n"
+            "<code>@WordSearchRobot вода</code>\n\n"
+            "После этого выберите результат.",
+            parse_mode="HTML",
+            reply_markup=get_dictionary_keyboard()
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # ПОЛЬЗОВАТЕЛЬ НЕ ПОДПИСАН
+    # --------------------------------------------------------
+
+    await message.answer(
+        "🔐 <b>Для работы с WordSearchRobot "
+        "нужна подписка.</b>\n\n"
+        "Подпишитесь на наш канал, "
+        "а затем нажмите "
+        "«Проверить подписку».\n\n"
+        "После успешной проверки вы сможете "
+        "искать значения слов прямо в любом "
+        "чате Telegram.",
+        parse_mode="HTML",
+        reply_markup=get_subscription_keyboard()
     )
 
 
 # ============================================================
-# INLINE HANDLER
+# ПРОВЕРКА ПОДПИСКИ ПО КНОПКЕ
 # ============================================================
 
+@router.callback_query(
+    F.data == "check_subscription"
+)
+async def subscription_callback(
+    callback: CallbackQuery,
+    bot: Bot
+):
+    """
+    Обработчик кнопки:
+
+        ✅ Проверить подписку
+    """
+
+    # Получаем пользователя,
+    # который нажал кнопку.
+    user_id = callback.from_user.id
+
+    # Проверяем подписку.
+    subscribed = await check_subscription(
+        bot,
+        user_id
+    )
+
+    # --------------------------------------------------------
+    # ОШИБКА
+    # --------------------------------------------------------
+
+    if subscribed is None:
+
+        await callback.answer(
+            "⚠️ Не удалось проверить подписку. "
+            "Попробуйте ещё раз.",
+            show_alert=True
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # ПОЛЬЗОВАТЕЛЬ ЕЩЁ НЕ ПОДПИСАН
+    # --------------------------------------------------------
+
+    if not subscribed:
+
+        await callback.answer(
+            "❌ Вы ещё не подписались на канал.",
+            show_alert=True
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # ПОДПИСКА ПОДТВЕРЖДЕНА
+    # --------------------------------------------------------
+
+    await callback.answer(
+        "✅ Подписка подтверждена!",
+        show_alert=True
+    )
+
+    # Пытаемся заменить старое сообщение.
+    try:
+
+        await callback.message.edit_text(
+
+            "🎉 <b>Вы подписались!</b>\n\n"
+
+            "Теперь WordSearchRobot доступен.\n\n"
+
+            "🔎 Чтобы найти значение слова, "
+            "напишите в любом чате:\n\n"
+
+            "<code>@WordSearchRobot слово</code>\n\n"
+
+            "Например:\n"
+
+            "<code>@WordSearchRobot вода</code>",
+
+            parse_mode="HTML",
+
+            reply_markup=get_dictionary_keyboard()
+        )
+
+    except Exception as error:
+
+        logger.warning(
+            "[EDIT ERROR] %s",
+            error
+        )
+
+
+# ============================================================
+# INLINE MODE
+# ============================================================
 
 @router.inline_query()
 async def inline_query_handler(
@@ -582,7 +811,7 @@ async def inline_query_handler(
     """
 
     # --------------------------------------------------------
-    # Получаем текст запроса.
+    # Получаем запрос.
     # --------------------------------------------------------
 
     query = clean_word(
@@ -590,80 +819,123 @@ async def inline_query_handler(
     )
 
     # --------------------------------------------------------
-    # Получаем ID пользователя.
+    # ID пользователя.
     # --------------------------------------------------------
 
     user_id = inline_query.from_user.id
 
+    # Записываем в консоль.
     logger.info(
-        "Inline query: user=%s query=%r",
+        "[INLINE] user=%s | query=%r",
         user_id,
         query
     )
 
+
     # --------------------------------------------------------
-    # Если пользователь ничего не ввёл.
+    # ЕСЛИ ПОЛЬЗОВАТЕЛЬ НИЧЕГО НЕ ВВЁЛ
     # --------------------------------------------------------
 
     if not query:
 
         await inline_query.answer(
+
             results=[
                 InlineQueryResultArticle(
+
                     id="help",
 
                     title="🔎 WordSearchRobot",
 
                     description=(
-                        "Введите слово для поиска "
-                        "в Wikipedia."
+                        "Введите слово для поиска."
                     ),
 
                     input_message_content=
                     InputTextMessageContent(
+
                         message_text=(
-                            "🔎 Используйте:\n\n"
+                            "🔎 <b>WordSearchRobot</b>\n\n"
+                            "Введите слово для поиска.\n\n"
                             "<code>"
-                            "@WordSearchRobot слово"
+                            "@WordSearchRobot вода"
                             "</code>"
                         ),
+
                         parse_mode="HTML"
                     )
                 )
             ],
 
-            # Не кэшируем результат надолго.
+            # Результат не нужно долго кэшировать.
             cache_time=1,
 
-            # Результат персональный.
+            # Результат зависит от конкретного пользователя.
             is_personal=True
         )
 
         return
 
+
     # --------------------------------------------------------
-    # Проверяем подписку.
+    # ПРОВЕРЯЕМ ПОДПИСКУ
     # --------------------------------------------------------
 
-    is_subscribed = await check_subscription(
+    subscribed = await check_subscription(
         bot,
         user_id
     )
 
+
     # --------------------------------------------------------
-    # Если пользователь НЕ подписан.
+    # ОШИБКА ПРОВЕРКИ
     # --------------------------------------------------------
 
-    if not is_subscribed:
+    if subscribed is None:
+
+        # Кнопка открывает личный чат с ботом.
+        open_bot_button = InlineQueryResultsButton(
+
+            text="⚠️ Открыть WordSearchRobot",
+
+            # При открытии бота Telegram отправит:
+            # /start check_subscription
+            start_parameter="check_subscription"
+        )
 
         await inline_query.answer(
+
             results=[
-                subscription_result()
+                InlineQueryResultArticle(
+
+                    id="subscription_check_error",
+
+                    title="⚠️ Не удалось проверить подписку",
+
+                    description=(
+                        "Откройте бота и попробуйте ещё раз."
+                    ),
+
+                    input_message_content=
+                    InputTextMessageContent(
+
+                        message_text=(
+                            "⚠️ <b>Не удалось проверить "
+                            "подписку.</b>\n\n"
+                            "Откройте @WordSearchRobot "
+                            "и попробуйте проверить подписку "
+                            "ещё раз."
+                        ),
+
+                        parse_mode="HTML"
+                    )
+                )
             ],
 
-            # Маленький cache_time,
-            # чтобы после подписки статус
-            # быстро обновился.
+            # Эта кнопка появляется сверху
+            # над результатами Inline.
+            button=open_bot_button,
+
             cache_time=1,
 
             is_personal=True
@@ -671,24 +943,92 @@ async def inline_query_handler(
 
         return
 
+
     # --------------------------------------------------------
-    # Пользователь подписан.
-    # Начинаем поиск.
+    # ПОЛЬЗОВАТЕЛЬ НЕ ПОДПИСАН
     # --------------------------------------------------------
 
+    if not subscribed:
+
+        # Создаём кнопку,
+        # которая открывает личный чат с ботом.
+        open_bot_button = InlineQueryResultsButton(
+
+            text="🔐 Открыть WordSearchRobot",
+
+            # Telegram передаст этот параметр
+            # в /start.
+            start_parameter="subscribe"
+        )
+
+        # Возвращаем результат,
+        # но вместо определения показываем инструкцию.
+        await inline_query.answer(
+
+            results=[
+                InlineQueryResultArticle(
+
+                    id="subscription_required",
+
+                    title="🔐 Требуется подписка",
+
+                    description=(
+                        "Подпишитесь на канал "
+                        "для использования словаря."
+                    ),
+
+                    input_message_content=
+                    InputTextMessageContent(
+
+                        message_text=(
+                            "🔐 <b>Для использования "
+                            "WordSearchRobot нужна подписка.</b>\n\n"
+                            "Нажмите кнопку "
+                            "«Открыть WordSearchRobot», "
+                            "подпишитесь на канал и "
+                            "пройдите проверку."
+                        ),
+
+                        parse_mode="HTML"
+                    )
+                )
+            ],
+
+            # Кнопка сверху.
+            button=open_bot_button,
+
+            # Не кэшируем надолго.
+            cache_time=1,
+
+            # Каждый пользователь должен
+            # проверяться отдельно.
+            is_personal=True
+        )
+
+        return
+
+
+    # ========================================================
+    # ПОЛЬЗОВАТЕЛЬ ПОДПИСАН
+    # ========================================================
+
+    # Ищем слово в Wikipedia.
     result = await search_wikipedia(
         query
     )
 
+
     # --------------------------------------------------------
-    # Wikipedia ничего не нашла.
+    # НИЧЕГО НЕ НАШЛИ
     # --------------------------------------------------------
 
     if not result:
 
         await inline_query.answer(
+
             results=[
                 InlineQueryResultArticle(
+
                     id="not_found",
 
                     title="❌ Ничего не найдено",
@@ -700,11 +1040,13 @@ async def inline_query_handler(
 
                     input_message_content=
                     InputTextMessageContent(
+
                         message_text=(
-                            f"❌ Не удалось найти "
-                            f"определение для "
-                            f"<b>{html.escape(query)}</b>."
+                            "❌ <b>Ничего не найдено.</b>\n\n"
+                            "Попробуйте написать слово "
+                            "по-другому."
                         ),
+
                         parse_mode="HTML"
                     )
                 )
@@ -717,8 +1059,9 @@ async def inline_query_handler(
 
         return
 
+
     # --------------------------------------------------------
-    # Формируем определение.
+    # ФОРМИРУЕМ ОПРЕДЕЛЕНИЕ
     # --------------------------------------------------------
 
     title = result["title"]
@@ -730,130 +1073,60 @@ async def inline_query_handler(
         extract
     )
 
+
     # --------------------------------------------------------
-    # Создаём результат,
-    # который пользователь сможет выбрать.
+    # СОЗДАЁМ INLINE-РЕЗУЛЬТАТ
     # --------------------------------------------------------
 
     article = InlineQueryResultArticle(
-        id=f"word_{abs(hash(title))}",
 
-        # Заголовок результата.
+        # Уникальный ID результата.
+        id=f"word_{abs(hash(title + str(user_id)))}",
+
+        # Название.
         title=f"📖 {title}",
 
-        # Краткое описание под ним.
+        # Описание в списке Telegram.
         description=extract[:200],
 
-        # Сообщение, которое будет отправлено
-        # в текущий чат после нажатия.
+        # Сообщение, которое отправится
+        # после нажатия пользователем.
         input_message_content=
         InputTextMessageContent(
+
             message_text=definition,
+
             parse_mode="HTML"
         )
     )
 
+
     # --------------------------------------------------------
-    # Отправляем результат Telegram.
+    # ОТПРАВЛЯЕМ РЕЗУЛЬТАТ TELEGRAM
     # --------------------------------------------------------
 
     await inline_query.answer(
+
         results=[article],
 
-        # Кэшируем недолго.
+        # Кэшируем на 30 секунд.
         cache_time=30,
 
-        # Результаты персональные.
+        # Персональный результат.
         is_personal=True
     )
 
 
 # ============================================================
-# CALLBACK: "Я подписался"
+# ЗАПУСК
 # ============================================================
-
-
-@router.callback_query(
-    F.data == "check_subscription"
-)
-async def check_subscription_callback(
-    callback: CallbackQuery,
-    bot: Bot
-):
-    """
-    Обработчик кнопки:
-
-        ✅ Я подписался
-
-    """
-
-    # Получаем пользователя,
-    # который нажал кнопку.
-    user_id = callback.from_user.id
-
-    # Проверяем подписку ещё раз.
-    is_subscribed = await check_subscription(
-        bot,
-        user_id
-    )
-
-    # --------------------------------------------------------
-    # Если подписки всё ещё нет.
-    # --------------------------------------------------------
-
-    if not is_subscribed:
-
-        await callback.answer(
-            "❌ Вы ещё не подписались на канал.",
-            show_alert=True
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Подписка подтверждена.
-    # --------------------------------------------------------
-
-    await callback.answer(
-        "✅ Подписка подтверждена!",
-        show_alert=True
-    )
-
-    # --------------------------------------------------------
-    # Пытаемся изменить сообщение,
-    # чтобы убрать предложение подписаться.
-    # --------------------------------------------------------
-
-    try:
-
-        await callback.message.edit_text(
-            "✅ <b>Подписка подтверждена!</b>\n\n"
-            "Теперь вы можете использовать "
-            "WordSearchRobot в Inline Mode.\n\n"
-            "Например:\n"
-            "<code>@WordSearchRobot вода</code>",
-            parse_mode="HTML"
-        )
-
-    except Exception as error:
-
-        logger.warning(
-            "Не удалось изменить сообщение: %s",
-            error
-        )
-
-
-# ============================================================
-# Запуск бота
-# ============================================================
-
 
 async def main():
     """
     Главная функция запуска.
     """
 
-    # Создаём объект Telegram Bot.
+    # Создаём Telegram Bot.
     bot = Bot(
         token=BOT_TOKEN
     )
@@ -870,33 +1143,49 @@ async def main():
     me = await bot.get_me()
 
     logger.info(
-        "Бот запущен: @%s",
+        "=========================================="
+    )
+
+    logger.info(
+        "WordSearchRobot запущен"
+    )
+
+    logger.info(
+        "Username: @%s",
         me.username
     )
 
-    # Запускаем long polling.
+    logger.info(
+        "Channel: %s",
+        CHANNEL_USERNAME
+    )
+
+    logger.info(
+        "=========================================="
+    )
+
+    # Запускаем Long Polling.
     await dp.start_polling(
         bot
     )
 
 
 # ============================================================
-# Точка входа
+# ТОЧКА ВХОДА
 # ============================================================
-
 
 if __name__ == "__main__":
 
     try:
 
-        # Запускаем asyncio.
+        # Запускаем бота.
         asyncio.run(
             main()
         )
 
     except KeyboardInterrupt:
 
-        # Корректное завершение через Ctrl+C.
+        # Корректное завершение.
         logger.info(
             "Бот остановлен."
         )
